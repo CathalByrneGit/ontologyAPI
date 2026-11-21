@@ -1,9 +1,14 @@
-#' ontologyAPI: REST API Server for Ontology-Based R Packages
+#' ontologyAPI: REST and MCP Servers for Ontology-Based R Packages
 #'
-#' Exposes objectSetsR, actionTypesR, and conceptR as a JSON REST API
-#' via plumber. Enables Python, TypeScript, and LLM agents to query object
-#' sets, traverse links, evaluate concepts, and submit actions without
-#' writing R.
+#' Serves an ontologySpecR bundle and its data over two protocols from one set
+#' of handlers: a JSON REST API (plumber) and a Model Context Protocol server
+#' (stdio or SSE). Build an [ontology_service()] once, then pass it to
+#' [serve_ontology()] and/or [serve_mcp()].
 #'
 #' @keywords internal
 "_PACKAGE"
+
+## usethis namespace: start
+#' @importFrom rlang %||%
+## usethis namespace: end
+NULL

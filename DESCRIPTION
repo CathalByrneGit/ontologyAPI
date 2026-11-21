@@ -1,32 +1,44 @@
 Package: ontologyAPI
-Title: REST API Server for Ontology-Based R Packages
-Version: 0.1.0
+Title: REST and MCP Servers for Ontology-Based R Packages
+Version: 0.2.0
 Authors@R:
-    person("Ontology", "Developer", role = c("aut", "cre"),
-           email = "dev@example.com")
-Description: Exposes objectSetsR, actionTypesR, and conceptR as a JSON REST API
-    via plumber. Enables Python, TypeScript, and LLM agents to query object sets,
-    traverse links, evaluate concepts, and submit actions without writing R.
-Depends: R (>= 4.0)
+    person("Cathal", "Byrne", role = c("aut", "cre"),
+           email = "cathal@example.com")
+Description: Serves an 'ontologySpecR' bundle and its data over two protocols
+    from one shared set of handlers: a JSON REST API (via 'plumber') and a
+    Model Context Protocol (MCP) server over stdio or server-sent events.
+    Python, TypeScript and LLM agents can query object sets, traverse links,
+    evaluate concepts, and submit actions without writing R.
+Depends: R (>= 4.1)
 Imports:
-    ontologySpecR,
-    objectSetsR,
-    actionTypesR,
-    plumber (>= 1.2.0),
+    ontologySpecR (>= 0.2.1),
+    objectSetsR (>= 0.3.1),
+    conceptR (>= 0.2.0),
+    actionTypesR (>= 0.2.0),
     jsonlite,
     rlang,
-    cli
+    cli,
+    utils
 Suggests:
-    conceptR,
-    auditR,
+    plumber (>= 1.2.0),
+    later,
+    promises,
+    httpuv,
     duckdb,
     DBI,
     callr,
-    testthat (>= 3.0.0),
     httr2,
+    testthat (>= 3.0.0),
     knitr,
     rmarkdown
+Remotes:
+    CathalByrneGit/ontologySpecR,
+    CathalByrneGit/objectSetsR,
+    CathalByrneGit/conceptR,
+    CathalByrneGit/actionTypesR
+VignetteBuilder: knitr
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
+RoxygenNote: 7.3.1
+Config/testthat/edition: 3

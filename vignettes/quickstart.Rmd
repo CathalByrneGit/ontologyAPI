@@ -11,155 +11,113 @@ vignette: >
 knitr::opts_chunk$set(eval = FALSE)
 ```
 
-## Overview
+`ontologyAPI` serves one ontology over two protocols, REST and the Model
+Context Protocol (MCP), from a single set of handlers. You build an
+`ontology_service()` once and hand it to either server, or both.
 
-`ontologyAPI` wraps an `ontologySpecR` bundle behind a JSON REST API via
-`plumber`. Once started, any HTTP client—Python, TypeScript, curl, or an LLM
-agent—can query object sets, traverse links, evaluate concepts, and submit
-actions.
+## 1. Build the service
 
-## 1. Start the server (R)
-
-```{r start-server}
+```{r service}
 library(ontologyAPI)
-library(duckdb)
 
-# Open your database
-con <- DBI::dbConnect(duckdb::duckdb(), "mydata.duckdb")
-
-# Load your bundle
-bundle <- readRDS("bundle.rds")   # created with ontologySpecR
-
-# Start on localhost:8080 (Swagger UI at http://127.0.0.1:8080/docs)
-serve_ontology(bundle, con, port = 8080L)
+con <- DBI::dbConnect(duckdb::duckdb(), "aviation.duckdb")
+svc <- ontology_service(
+  ontologySpecR::spec_example_bundle(),   # or a bundle JSON path
+  con,
+  actor = "analyst"
+)
+svc
 ```
 
-Set `ONTOLOGY_API_KEY` before starting to require Bearer-token auth:
+The service holds the normalised bundle and the `objectSetsR`, `conceptR` and
+`actionTypesR` contexts. To run R action handlers, register them now:
 
-```sh
-ONTOLOGY_API_KEY=my-secret Rscript -e \
-  "ontologyAPI::serve_ontology(bundle, con, port = 8080L)"
+```{r handlers}
+svc$action_ctx <- actionTypesR::register_handler(
+  svc$action_ctx, "UpdateAirportStatus",
+  function(connection, action, params, target_ids) {
+    # ... update the rows for target_ids ...
+    list(updated = length(target_ids))
+  }
+)
 ```
 
-## 2. Call from R with httr2
+Optionally restrict what callers may do, for both protocols:
+
+```{r auth}
+svc <- ontology_service(bundle, con, actor = "analyst",
+  auth = function(actor, operation, resource) operation != "submit_action")
+```
+
+## 2. Serve REST
+
+```{r rest}
+serve_ontology(svc, port = 8080L)   # Swagger UI at /__docs__/
+```
+
+Set `ONTOLOGY_API_KEY`, or pass `api_key =`, to require
+`Authorization: Bearer <key>`.
 
 ```{r httr2}
 library(httr2)
-
 base <- "http://127.0.0.1:8080"
 
-# Health check
-request(paste0(base, "/v1/health")) |> req_perform() |> resp_body_json()
-
-# Query Irish airports
 request(paste0(base, "/v1/objects/Airport/query")) |>
   req_body_json(list(
     filters = list(list(property = "country", op = "eq", value = "Ireland")),
-    limit   = 50L
+    limit = 50
   )) |>
   req_perform() |>
   resp_body_json()
 
-# Fetch one airport by primary key
-request(paste0(base, "/v1/objects/Airport/DUB")) |>
-  req_perform() |>
-  resp_body_json()
-
-# Traverse: routes departing Dublin
-request(paste0(base, "/v1/objects/Airport/DUB/traverse/FlightRoute")) |>
+# Routes departing Dublin: the RouteOrigin link runs FlightRoute -> Airport,
+# so from an Airport this is the reverse direction.
+request(paste0(base, "/v1/objects/Airport/DUB/search_around/RouteOrigin")) |>
   req_method("POST") |>
-  req_body_json(list(limit = 10L)) |>
+  req_body_json(list(limit = 10)) |>
   req_perform() |>
   resp_body_json()
 ```
 
-## 3. Call from Python
+## 3. Serve MCP
 
-```python
-import requests
-
-BASE = "http://127.0.0.1:8080"
-HEADERS = {"Authorization": "Bearer my-secret"}   # omit if no key set
-
-# Health
-print(requests.get(f"{BASE}/v1/health", headers=HEADERS).json())
-
-# Query with filters
-resp = requests.post(
-    f"{BASE}/v1/objects/Airport/query",
-    json={
-        "filters": [{"property": "country", "op": "eq", "value": "Ireland"}],
-        "limit": 50,
-    },
-    headers=HEADERS,
-)
-airports = resp.json()["data"]["rows"]
-print(f"Found {len(airports)} Irish airports")
-
-# Single object
-dub = requests.get(f"{BASE}/v1/objects/Airport/DUB", headers=HEADERS).json()
-print(dub["data"]["name"])
-
-# Traverse link
-routes = requests.post(
-    f"{BASE}/v1/objects/Airport/DUB/traverse/FlightRoute",
-    json={"limit": 10},
-    headers=HEADERS,
-).json()
-print(routes["data"]["rows"])
+```{r mcp}
+serve_mcp(svc)                          # stdio, for Claude Desktop
+serve_mcp(svc, transport = "sse", port = 3000L)
 ```
 
-## 4. Supported filter operators
+Add your own tools before serving:
 
-| `op`           | Meaning                            |
-|----------------|------------------------------------|
-| `eq`           | equal                              |
-| `neq`          | not equal                          |
-| `gt`           | greater than                       |
-| `gte`          | greater than or equal              |
-| `lt`           | less than                          |
-| `lte`          | less than or equal                 |
-| `contains`     | substring match (case-sensitive)   |
-| `starts_with`  | prefix match                       |
-| `in`           | value in array                     |
-| `not_in`       | value not in array                 |
-| `is_null`      | value is NA / NULL                 |
-| `is_not_null`  | value is not NA / NULL             |
+```{r add-tool}
+server <- mcp_server(svc, name = "aviation")
+mcp_add_tool(server, "irish_airports", "List airports in Ireland",
+  input_schema = list(type = "object", properties = list()),
+  handler = function(params, server) {
+    ontologyAPI:::h_query(server$svc, "Airport",
+      filters = list(list(property = "country", op = "eq", value = "Ireland")))
+  })
+serve_mcp(server)
+```
 
-Filter values are always passed as R objects through rlang quosures—never
-interpolated into SQL strings—so SQL injection is not possible.
+## 4. Filters
 
-## 5. Submit an action
+Both protocols take the same `filters` array of `{property, op, value}`
+objects. The ops are `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `contains`,
+`starts_with`, `in`, `not_in`, `is_null` and `is_not_null`. Values are
+injected into `objectSetsR::os_filter()` as R values, never pasted into SQL.
+
+## 5. Actions
 
 ```{r action}
 request(paste0(base, "/v1/actions/UpdateAirportStatus/submit")) |>
   req_body_json(list(
     params     = list(new_status = "maintenance"),
-    target_ids = c("DUB"),
-    dry_run    = FALSE
+    target_ids = list("DUB"),
+    dry_run    = TRUE
   )) |>
   req_perform() |>
   resp_body_json()
 ```
 
-Use `dry_run = TRUE` to preview the plan without executing it.
-
-## 6. Programmatic use in tests
-
-```{r test-server}
-library(ontologyAPI)
-library(callr)
-
-port <- sample(49152L:65534L, 1L)
-srv  <- callr::r_bg(function(port) {
-  library(ontologyAPI)
-  con    <- DBI::dbConnect(duckdb::duckdb(), ":memory:")
-  bundle <- build_my_test_bundle()        # your helper
-  plumber::pr_run(ontology_router(bundle, con), port = port, quiet = TRUE)
-}, args = list(port = port), supervise = TRUE)
-
-Sys.sleep(1)   # wait for server to be ready
-base <- paste0("http://127.0.0.1:", port)
-# ... run tests ...
-srv$kill()
-```
+Over REST, `dry_run` defaults to `false`. The MCP `submit_action` tool
+defaults to `true`, so agents preview the plan before changing anything.

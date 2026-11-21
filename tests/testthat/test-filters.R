@@ -1,89 +1,84 @@
-test_that("build_filter_expr: eq produces equality expression", {
-  col  <- rlang::sym("country")
-  expr <- build_filter_expr(col, "eq", "Ireland")
-  expect_equal(rlang::expr_text(expr), 'country == "Ireland"')
+test_that("build_filter_expr: comparisons", {
+  col <- rlang::sym("country")
+  expect_equal(rlang::expr_text(build_filter_expr(col, "eq", "Ireland")), 'country == "Ireland"')
+  expect_equal(rlang::expr_text(build_filter_expr(col, "neq", "Ireland")), 'country != "Ireland"')
+  cap <- rlang::sym("capacity")
+  expect_match(rlang::expr_text(build_filter_expr(cap, "gt", 1L)), "capacity > ")
+  expect_match(rlang::expr_text(build_filter_expr(cap, "gte", 1L)), "capacity >= ")
+  expect_match(rlang::expr_text(build_filter_expr(cap, "lt", 1L)), "capacity < ")
+  expect_match(rlang::expr_text(build_filter_expr(cap, "lte", 1L)), "capacity <= ")
 })
 
-test_that("build_filter_expr: neq", {
-  col  <- rlang::sym("country")
-  expr <- build_filter_expr(col, "neq", "Ireland")
-  expect_equal(rlang::expr_text(expr), 'country != "Ireland"')
+test_that("build_filter_expr: contains / starts_with use escaped regex", {
+  col <- rlang::sym("name")
+  expect_equal(rlang::expr_text(build_filter_expr(col, "contains", "a.b")),
+               'grepl("a\\\\.b", name)')
+  expect_match(rlang::expr_text(build_filter_expr(col, "starts_with", "Dub")), '"\\^Dub"')
 })
 
-test_that("build_filter_expr: numeric comparisons", {
-  col <- rlang::sym("capacity")
-  expect_match(rlang::expr_text(build_filter_expr(col, "gt",  1000L)), "capacity > ")
-  expect_match(rlang::expr_text(build_filter_expr(col, "gte", 1000L)), "capacity >= ")
-  expect_match(rlang::expr_text(build_filter_expr(col, "lt",  5000L)), "capacity < ")
-  expect_match(rlang::expr_text(build_filter_expr(col, "lte", 5000L)), "capacity <= ")
+test_that("build_filter_expr: in / not_in / null checks", {
+  col <- rlang::sym("country")
+  expect_match(rlang::expr_text(build_filter_expr(col, "in", c("IE", "UK"))), "%in%")
+  expect_match(rlang::expr_text(build_filter_expr(col, "not_in", c("IE", "UK"))), "^!")
+  expect_equal(rlang::expr_text(build_filter_expr(col, "is_null", NULL)), "is.na(country)")
+  expect_equal(rlang::expr_text(build_filter_expr(col, "is_not_null", NULL)), "!is.na(country)")
 })
 
-test_that("build_filter_expr: contains uses grepl with fixed = TRUE", {
-  col  <- rlang::sym("name")
-  expr <- build_filter_expr(col, "contains", "Dublin")
-  txt  <- rlang::expr_text(expr)
-  expect_match(txt, "grepl")
-  expect_match(txt, "fixed = TRUE")
+test_that("escape_regex escapes every metacharacter", {
+  special <- "a.b*c+d?e^f$g(h)i[j]k{l}m|n\\o"
+  expect_true(grepl(escape_regex(special), special))
+  expect_false(grepl(escape_regex("a.b"), "axb"))
 })
 
-test_that("build_filter_expr: starts_with", {
-  col  <- rlang::sym("name")
-  expr <- build_filter_expr(col, "starts_with", "Dub")
-  expect_match(rlang::expr_text(expr), "startsWith")
+test_that("normalize_filters accepts the shapes both protocols produce", {
+  expect_equal(normalize_filters(NULL), list())
+  one <- list(property = "country", op = "eq", value = "IE")
+  expect_equal(normalize_filters(one), list(one))
+  expect_equal(normalize_filters(list(one)), list(one))
+  # plumber parses a JSON array of objects into a data frame
+  df <- data.frame(property = c("country", "city"), op = c("eq", "neq"),
+                   value = c("IE", "Cork"), stringsAsFactors = FALSE)
+  out <- normalize_filters(df)
+  expect_length(out, 2L)
+  expect_equal(out[[2]], list(property = "city", op = "neq", value = "Cork"))
+  expect_error(normalize_filters("x"), class = "ontapi_bad_request")
 })
 
-test_that("build_filter_expr: in / not_in", {
-  col   <- rlang::sym("country")
-  val   <- c("Ireland", "UK")
-  expr_in  <- build_filter_expr(col, "in",     val)
-  expr_nin <- build_filter_expr(col, "not_in", val)
-  expect_match(rlang::expr_text(expr_in),  "%in%")
-  expect_match(rlang::expr_text(expr_nin), "%in%")
-  expect_match(rlang::expr_text(expr_nin), "^!")
+test_that("every filter op runs against DuckDB", {
+  svc <- local_service()
+  n <- function(...) h_count(svc, "Airport", filters = list(list(...)))$count
+  expect_equal(n(property = "country", op = "eq", value = "Ireland"), 3)
+  expect_equal(n(property = "country", op = "neq", value = "Ireland"), 3)
+  expect_equal(n(property = "elevation_ft", op = "gt", value = 242), 2)
+  expect_equal(n(property = "elevation_ft", op = "gte", value = 242), 3)
+  expect_equal(n(property = "elevation_ft", op = "lt", value = 83), 2)
+  expect_equal(n(property = "elevation_ft", op = "lte", value = 83), 3)
+  expect_equal(n(property = "name", op = "contains", value = "Airport"), 3)
+  expect_equal(n(property = "name", op = "contains", value = "."), 1)
+  expect_equal(n(property = "name", op = "starts_with", value = "C"), 2)
+  expect_equal(n(property = "country", op = "in", value = list("UK", "France")), 2)
+  expect_equal(n(property = "country", op = "not_in", value = list("UK", "France")), 4)
+  expect_equal(n(property = "city", op = "is_null"), 0)
+  expect_equal(n(property = "city", op = "is_not_null"), 6)
 })
 
-test_that("build_filter_expr: is_null / is_not_null ignore value", {
-  col <- rlang::sym("city")
-  expect_equal(rlang::expr_text(build_filter_expr(col, "is_null",     NULL)), "is.na(city)")
-  expect_equal(rlang::expr_text(build_filter_expr(col, "is_not_null", NULL)), "!is.na(city)")
+test_that("SQL injection in a filter value is harmless", {
+  svc <- local_service()
+  res <- h_query(svc, "Airport", filters = list(list(
+    property = "country", op = "eq", value = "'; DROP TABLE airports; --"
+  )))
+  expect_equal(res$total_count, 0)
+  res2 <- h_count(svc, "Airport", filters = list(list(
+    property = "name", op = "contains", value = "%' OR 1=1 --"
+  )))
+  expect_equal(res2$count, 0)
+  expect_equal(h_count(svc, "Airport")$count, 6)
 })
 
-test_that("translate_filter aborts with http_400 for unknown op", {
-  mock_os <- structure(list(), class = "ObjectSet")
+test_that("an injected property name is rejected before reaching the database", {
+  svc <- local_service()
   expect_error(
-    translate_filter(mock_os, list(property = "country", op = "INVALID", value = "x")),
-    class = "http_400"
+    h_query(svc, "Airport", filters = list(list(property = "1; DROP TABLE x", op = "eq", value = 1))),
+    class = "ontapi_bad_request"
   )
-})
-
-test_that("apply_filters returns os unchanged for empty/NULL filters", {
-  os <- structure(list(type = "test"), class = "ObjectSet")
-  expect_identical(apply_filters(os, NULL),    os)
-  expect_identical(apply_filters(os, list()),  os)
-})
-
-test_that("SQL injection in filter value is harmless (DuckDB integration)", {
-  skip_deps()
-
-  con <- DBI::dbConnect(duckdb::duckdb(), ":memory:")
-  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
-  seed_test_db(con)
-
-  bundle     <- make_test_bundle()
-  object_ctx <- objectSetsR::ontology_context(bundle, con)
-  os         <- objectSetsR::os_get(object_ctx, "Airport")
-
-  injection  <- "'; DROP TABLE airports; --"
-  os_filtered <- translate_filter(os, list(
-    property = "country",
-    op       = "eq",
-    value    = injection
-  ))
-
-  rows <- objectSetsR::os_collect(os_filtered)
-  expect_equal(nrow(rows), 0L)
-
-  # Confirm the table still exists (injection did not execute)
-  expect_true(DBI::dbExistsTable(con, "airports"))
-  expect_gt(nrow(DBI::dbGetQuery(con, "SELECT * FROM airports")), 0L)
 })

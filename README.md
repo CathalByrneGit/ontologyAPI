@@ -1,290 +1,209 @@
 # ontologyAPI
 
-A plumber-based REST API server that exposes [`objectSetsR`](https://github.com/cathalbyrnegit/objectSetsR), [`actionTypesR`](https://github.com/cathalbyrnegit/actionTypesR), and [`conceptR`](https://github.com/cathalbyrnegit/conceptR) over HTTP. Lets Python, TypeScript, curl, and LLM agents query object sets, traverse links, evaluate concepts, and submit actions — no R required on the client side.
+Serve an [`ontologySpecR`](https://github.com/CathalByrneGit/ontologySpecR) bundle and its data over **two protocols from one set of handlers**:
+
+- a **JSON REST API**, via plumber, for Python, TypeScript, curl and any other HTTP client;
+- a **Model Context Protocol (MCP) server**, over stdio or SSE, for LLM agents such as Claude Desktop.
+
+Both read data through [`objectSetsR`](https://github.com/CathalByrneGit/objectSetsR), concepts through [`conceptR`](https://github.com/CathalByrneGit/conceptR) and actions through [`actionTypesR`](https://github.com/CathalByrneGit/actionTypesR). A query sent over REST and the same query sent over MCP return the same rows, and the test suite checks that.
 
 ```
-ontologySpecR ─┐
-objectSetsR   ─┤
-actionTypesR  ─┼─► ontologyAPI ──► HTTP clients (Python, TS, curl, agents)
-conceptR      ─┘              └──► ontologyMCP  (next layer)
+ontologySpecR ─┐                         ┌─► REST  (plumber)    ─► HTTP clients
+objectSetsR   ─┤                         │
+conceptR      ─┼─► ontology_service() ─► handlers (R/handlers.R)
+actionTypesR  ─┘                         │
+                                         └─► MCP   (stdio / SSE) ─► LLM agents
 ```
+
+> ontologyAPI 0.2.0 absorbs the former **ontologyMCP** package. `serve_mcp()` and `mcp_add_tool()` now live here.
 
 ## Installation
 
 ```r
-# Install from source (dependencies must be available)
-devtools::install_local("path/to/ontologyAPI")
+# install.packages("remotes")
+remotes::install_github("CathalByrneGit/ontologyAPI")
 ```
 
-Required packages: `ontologySpecR`, `objectSetsR`, `actionTypesR`, `plumber (>= 1.2.0)`, `jsonlite`, `rlang`, `cli`
+Required: `ontologySpecR`, `objectSetsR (>= 0.3.1)`, `conceptR`, `actionTypesR`, `jsonlite`, `rlang`, `cli`.
 
-Optional: `conceptR`, `auditR`, `duckdb`
+Each server's own dependencies are optional, so installing for MCP doesn't pull in plumber:
+
+| You want | Also install |
+|---|---|
+| REST server | `plumber` |
+| MCP over stdio | nothing more |
+| MCP over SSE | `httpuv`, `later` |
 
 ## Quick start
 
+Build one service, then serve it over either protocol, or both:
+
 ```r
 library(ontologyAPI)
-library(duckdb)
 
-con    <- DBI::dbConnect(duckdb::duckdb(), "mydata.duckdb")
-bundle <- readRDS("bundle.rds")   # ontologySpecR bundle
+con <- DBI::dbConnect(duckdb::duckdb(), "aviation.duckdb")
+svc <- ontology_service("bundle.json", con)   # or an ontology_bundle
 
-# Starts on http://127.0.0.1:8080 — Swagger UI at /docs
-serve_ontology(bundle, con, port = 8080L)
+# REST on http://127.0.0.1:8080 (Swagger UI at /__docs__/)
+serve_ontology(svc, port = 8080L)
+
+# MCP over stdio, the transport Claude Desktop uses
+serve_mcp(svc)
 ```
 
-Set `ONTOLOGY_API_KEY` before starting to require Bearer-token auth on every request:
+`ontology_service(bundle, connection, actor = NULL, auth = NULL)` runs `ontologySpecR::as_bundle()` once and builds the `objectSetsR`, `conceptR` and `actionTypesR` contexts. `conceptR` and `actionTypesR` create their own tables in the connection if they are missing.
 
-```sh
-ONTOLOGY_API_KEY=my-secret Rscript -e \
-  "ontologyAPI::serve_ontology(bundle, con, port = 8080L)"
+Register R action handlers on the service before serving:
+
+```r
+svc$action_ctx <- actionTypesR::register_handler(
+  svc$action_ctx, "UpdateAirportStatus",
+  function(connection, action, params, target_ids) { ... }
+)
 ```
 
-## Authentication
-
-| `ONTOLOGY_API_KEY` set? | Behaviour |
-|---|---|
-| No | Development mode — all requests pass, startup warning is logged |
-| Yes | Every request must include `Authorization: Bearer <key>`, otherwise `401` |
-
-## API reference
-
-All responses use a standard envelope:
-
-```json
-{ "data": ..., "meta": { "status": "ok",   "took_ms": 12 } }
-{ "error": "...", "meta": { "status": "error", "took_ms": 5  } }
-```
-
-Base path: `/v1`
-
----
-
-### Health
-
-```
-GET /v1/health
-```
-
-```json
-{ "status": "ok", "bundle_id": "aviation-demo", "bundle_version": "1.0.0" }
-```
-
----
-
-### Bundle
-
-```
-GET /v1/bundle                → full bundle as JSON
-GET /v1/bundle/objects        → [{ id, display_name, property_count, source_table }]
-GET /v1/bundle/links          → [{ id, from, to, cardinality, directed }]
-GET /v1/bundle/actions        → [{ id, display_name, parameter_count, targets }]
-```
-
----
-
-### Object sets
-
-```
-POST /v1/objects/{object_type_id}/query
-GET  /v1/objects/{object_type_id}/count
-GET  /v1/objects/{object_type_id}/{pk_value}
-```
-
-**Query request body:**
+### Claude Desktop
 
 ```json
 {
-  "filters": [
-    { "property": "country",  "op": "eq",      "value": "Ireland" },
-    { "property": "capacity", "op": "gte",     "value": 1000      },
-    { "property": "name",     "op": "contains","value": "Dublin"  }
-  ],
-  "search": "optional free text",
-  "limit": 100,
-  "offset": 0,
-  "select": ["airport_id", "name", "country"]
-}
-```
-
-**Supported filter operators:**
-
-| `op` | Meaning |
-|---|---|
-| `eq` / `neq` | equal / not equal |
-| `gt` / `gte` | greater than / greater than or equal |
-| `lt` / `lte` | less than / less than or equal |
-| `contains` | substring (fixed, case-sensitive) |
-| `starts_with` | prefix match |
-| `in` / `not_in` | value in / not in array |
-| `is_null` / `is_not_null` | null check |
-
-Filter values are passed through rlang quosures into `objectSetsR::os_filter()` — never interpolated into SQL strings. SQL injection is not possible.
-
-**Query response:**
-
-```json
-{
-  "data": { "rows": [...], "total_count": 42, "has_more": false },
-  "meta": { "status": "ok", "took_ms": 8 }
-}
-```
-
----
-
-### Link traversal
-
-```
-POST /v1/objects/{object_type_id}/{pk_value}/traverse/{link_type_id}
-POST /v1/objects/{object_type_id}/{pk_value}/search_around/{link_type_id}
-```
-
-Optional body: `{ "limit": 50, "select": ["id", "name"] }`
-
-`traverse` follows the link forward; `search_around` is the reverse direction.
-
----
-
-### Actions
-
-```
-POST /v1/actions/{action_type_id}/submit
-GET  /v1/actions/log?n=100&action_type_id=UpdateAirportStatus
-```
-
-**Submit body:**
-
-```json
-{
-  "params":     { "new_status": "maintenance" },
-  "target_ids": ["DUB"],
-  "dry_run":    false
-}
-```
-
-`dry_run: true` returns a plan object without executing anything:
-
-```json
-{
-  "data": {
-    "plan": {
-      "action_type_id": "UpdateAirportStatus",
-      "params":         { "new_status": "maintenance" },
-      "target_ids":     ["DUB"],
-      "impl_kind":      "r"
+  "mcpServers": {
+    "aviation": {
+      "command": "Rscript",
+      "args": ["-e", "con <- DBI::dbConnect(duckdb::duckdb(), 'aviation.duckdb'); ontologyAPI::serve_mcp(ontologyAPI::ontology_service('bundle.json', con))"]
     }
   }
 }
 ```
 
-Live submission returns:
+With stdio, stdout carries only JSON-RPC. While the server runs, all console output, messages and `cli` output go to stderr.
 
-```json
-{
-  "data": {
-    "submission_id":  "a1b2c3d4-...",
-    "status":         "success",
-    "action_type_id": "UpdateAirportStatus"
-  }
-}
+## Access control
+
+| Layer | How | Failure |
+|---|---|---|
+| REST API key | `ONTOLOGY_API_KEY` env var, or `ontology_router(svc, api_key = )`. Clients send `Authorization: Bearer <key>`. Unset means development mode, with a warning. | `401` |
+| Per-operation authorisation (both protocols) | `ontology_service(auth = function(actor, operation, resource) ...)`. `operation` is `"read"`, `"evaluate_concept"` or `"submit_action"`. Return `TRUE` to allow. | `403` / JSON-RPC `-32001` |
+
+An approval gate that denies an action (`actionTypesR::register_approval_gate()`) is also reported as forbidden.
+
+## Errors
+
+The handlers raise three error classes once, and each protocol maps them to its own codes:
+
+| Class | REST | MCP (JSON-RPC) |
+|---|---|---|
+| `ontapi_bad_request` (bad filter, unknown property, invalid params) | 400 | -32602 |
+| `ontapi_not_found` (unknown type, link, concept, action or object) | 404 | -32602 |
+| `ontapi_forbidden` | 403 | -32001 |
+| anything else | 500 | -32603 |
+
+The REST error body is `{"error": "...", "meta": {"status": "error", "kind": "not_found", ...}}`. MCP errors carry the same message, with `data.kind` set to the same kind.
+
+## Filters
+
+REST and MCP accept the same filter syntax: an array of `{property, op, value}` objects, ANDed together.
+
+| `op` | Meaning |
+|---|---|
+| `eq` / `neq` | equal / not equal |
+| `gt` / `gte` / `lt` / `lte` | comparisons |
+| `contains` | literal substring (case-sensitive) |
+| `starts_with` | literal prefix |
+| `in` / `not_in` | value in / not in an array |
+| `is_null` / `is_not_null` | null checks (no `value`) |
+
+Property names are checked against the object type. Values reach the database only as values injected into `objectSetsR::os_filter()`, never pasted into SQL.
+
+## REST API
+
+Every response uses one envelope: `{"data": ..., "meta": {"status": "ok", "took_ms": 3}}`.
+
+```
+GET  /v1/health
+GET  /v1/bundle                      full bundle JSON
+GET  /v1/bundle/objects              object types (properties, primary key, source table)
+GET  /v1/bundle/links                link types (endpoints, join keys, cardinality)
+GET  /v1/bundle/actions              action types (parameters, targets, impl kind)
+GET  /v1/bundle/summary              ids, row counts, concept count
+
+POST /v1/objects/{type}/query        {filters, select, limit = 100, offset = 0}
+GET  /v1/objects/{type}/count
+POST /v1/objects/{type}/count        {filters}
+GET  /v1/objects/{type}/{pk}
+POST /v1/objects/{type}/{pk}/traverse/{link}        {limit = 50, select}   follow the link forward
+POST /v1/objects/{type}/{pk}/search_around/{link}   {limit = 50, select}   reverse: who links to me
+
+GET  /v1/concepts
+GET  /v1/concepts/{id}
+GET  /v1/concepts/{id}/evaluate?scope=&version=&stage=&limit=
+
+POST /v1/actions/{id}/submit         {params, target_ids, dry_run = false}
+GET  /v1/actions/log?n=100&action_type_id=
 ```
 
----
+`query` returns `{rows, total_count, has_more, limit, offset}`. Rows are paged in the database with `objectSetsR::os_slice()`, ordered by primary key, so pages are stable.
 
-### Concepts _(optional — requires `conceptR`)_
+For a composite primary key, the `{pk}` path segment joins the key parts with `|`, in key order.
 
-```
-GET /v1/concepts
-GET /v1/concepts/{concept_id}
-GET /v1/concepts/{concept_id}/evaluate?scope=flow&stage=production
-```
+## MCP tools
 
-Evaluate response includes per-row results plus `true_count` / `false_count`.
+`mcp_server(svc)` registers ten tools, each a thin wrapper over a handler:
 
----
+| Tool | Handler |
+|---|---|
+| `get_ontology_summary` | `h_summary` |
+| `list_object_types` / `list_link_types` | `h_object_types` / `h_link_types` |
+| `query_objects` / `count_objects` / `get_object` | `h_query` / `h_count` / `h_get` |
+| `traverse_links` (`direction = forward / reverse`) | `h_traverse` |
+| `list_concepts` / `evaluate_concept` | `h_concepts` / `h_evaluate_concept` |
+| `submit_action` (**`dry_run` defaults to `true`**) | `h_submit_action` |
 
-## Calling from Python
+The server also offers resources: `ontology://bundle`, `ontology://schema` and `ontology://objects/{type}/schema`.
 
-```python
-import requests
-
-BASE    = "http://127.0.0.1:8080"
-HEADERS = {"Authorization": "Bearer my-secret"}
-
-# Query with filters
-resp = requests.post(f"{BASE}/v1/objects/Airport/query", headers=HEADERS, json={
-    "filters": [{"property": "country", "op": "eq", "value": "Ireland"}],
-    "limit": 50,
-})
-airports = resp.json()["data"]["rows"]
-
-# Single object
-dub = requests.get(f"{BASE}/v1/objects/Airport/DUB", headers=HEADERS).json()
-
-# Traverse a link
-routes = requests.post(
-    f"{BASE}/v1/objects/Airport/DUB/traverse/FlightRoute",
-    headers=HEADERS, json={"limit": 10}
-).json()["data"]["rows"]
-```
-
-## Calling from R (httr2)
+### Adding tools
 
 ```r
-library(httr2)
-
-base <- "http://127.0.0.1:8080"
-
-request(paste0(base, "/v1/objects/Airport/query")) |>
-  req_body_json(list(
-    filters = list(list(property = "country", op = "eq", value = "Ireland"))
-  )) |>
-  req_perform() |>
-  resp_body_json()
+server <- mcp_server(svc, name = "aviation")
+mcp_add_tool(server, "busiest_airport", "Airport with the most departing routes",
+  input_schema = list(type = "object", properties = list()),
+  handler = function(params, server) {
+    # return an MCP result (list(content = ...)) or any value, sent as JSON
+    ...
+  })
+serve_mcp(server, transport = "stdio")
 ```
+
+A handler can take `function(params)` or `function(params, server)`. Duplicate names are an error. The server is modified in place, so code that ignores the returned value still sees the new tool, as `ontologyDiscoverR::dis_add_mcp_tool()` relies on.
 
 ## Package structure
 
 ```
 R/
-  server.R           # ontology_router(), serve_ontology()
-  auth.R             # Bearer-token plumber filter
-  error_handler.R    # global error → JSON envelope; http_abort()
-  filters.R          # translate_filter(), apply_filters(), build_filter_expr()
-  response.R         # ok_response(), error_response(), elapsed_ms(), df_to_list()
-  router_health.R    # GET /v1/health
-  router_bundle.R    # GET /v1/bundle/**
-  router_objects.R   # POST|GET /v1/objects/**
-  router_actions.R   # POST /v1/actions/**
-  router_concepts.R  # GET /v1/concepts/** (optional)
-  ontologyAPI-package.R
-
-tests/testthat/
-  setup.R                   # shared fixtures, start_test_server()
-  test-filters.R            # filter expression building, SQL injection resistance
-  test-auth.R               # unit + integration auth tests
-  test-error-handling.R     # http_abort, error envelope, 404/400 from live server
-  test-bundle-endpoints.R   # /bundle/** integration tests
-  test-objects-endpoints.R  # query, count, single-object, 404, has_more
-  test-traversal.R          # traverse, search_around
-  test-actions-endpoints.R  # submit, dry_run, log
-
-vignettes/
-  quickstart.Rmd
+  service.R            ontology_service(), the auth hook
+  handlers.R           shared handlers h_*(), filter parsing, primary keys
+  errors.R             ontapi_* error classes and the REST status mapping
+  json.R               the JSON encoding both protocols share
+  rest_server.R        ontology_router(), serve_ontology()
+  router_*.R           REST routes: parse request, call handler, format response
+  rest_response.R      response envelope
+  rest_error_handler.R error class to HTTP status
+  auth.R               Bearer-token filter (REST only)
+  mcp_server.R         mcp_server(), mcp_add_tool(), serve_mcp()
+  mcp_tool_registry.R  built-in tool schemas
+  mcp_tools.R          built-in tools: unpack arguments, call handler
+  mcp_protocol.R       JSON-RPC dispatch
+  mcp_errors.R         JSON-RPC codes and error class mapping
+  mcp_resources.R      ontology:// resources
+  mcp_transport_*.R    stdio and SSE transports
+tools/
+  check-cross-package.R  checks every core pkg::fn exists and the bundle is never read by key
 ```
 
 ## Testing
 
-Unit tests (filters, auth, error handler) run without any server:
-
 ```r
 devtools::test()
+Rscript tools/check-cross-package.R   # prints nothing when clean
 ```
 
-Integration tests spin up a real plumber server via `callr::r_bg()` against a DuckDB `:memory:` database seeded with aviation demo data (6 airports, 4 routes). They are skipped automatically if `callr`, `httr2`, or the ontology packages are not installed.
-
-## Security
-
-- **SQL injection** — filter values never reach the query as strings. They are captured as R objects and injected via rlang quosures into `objectSetsR::os_filter()`, which translates them to parameterised dbplyr expressions.
-- **Auth** — when `ONTOLOGY_API_KEY` is set, the plumber filter rejects any request missing a matching `Authorization: Bearer <key>` header with `401` before it reaches any route handler.
-- **Error leakage** — the global error handler returns the condition message only; no stack traces are exposed to clients.
+The fixtures use `ontologySpecR::spec_example_bundle()` and an in-memory DuckDB database built to match it. Most tests call the handlers directly. REST routes run in-process through plumber, MCP runs through `handle_message()` and the stdio transport, and one test checks that the same query returns identical rows over both. A single live-HTTP test (via `callr`) runs only when the package is installed.
